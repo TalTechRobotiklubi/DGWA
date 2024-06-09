@@ -1,5 +1,4 @@
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
-discord
-python-dotenv
+discord~=2.3.2
+python-dotenv~=1.0.1
+google-auth-oauthlib~=1.2.0
+google-api-python-client~=2.132.0
