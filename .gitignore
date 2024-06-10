@@ -188,3 +188,5 @@ fabric.properties
 
 # DGWA specific
 group_read_token.json
+swag-config/
+docker-compose.override.yml

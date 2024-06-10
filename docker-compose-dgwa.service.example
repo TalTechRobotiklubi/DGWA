@@ -1,0 +1,15 @@
+[Unit]
+Description=Discord Google Workspace Auth
+Requires=docker.service
+After=docker.service
+
+[Service]
+WorkingDirectory=/opt/docker/DGWA
+ExecStart=/usr/local/bin/docker-compose up -d
+ExecStop=/usr/local/bin/docker-compose down
+Restart=always
+User=dockeruser
+Group=dockeruser
+
+[Install]
+WantedBy=multi-user.target

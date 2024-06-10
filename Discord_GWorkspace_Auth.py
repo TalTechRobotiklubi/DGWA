@@ -20,10 +20,6 @@ INTENTS.guilds = True
 INTENTS.messages = True
 INTENTS.message_content = True
 
-# Tech lead Discord user ID to receive authentication request in case of token expiration
-# Endrik Einberg, enduity
-TECH_LEAD_ID = 113390499733176320
-
 # Google API variables
 GOOGLE_SCOPES = [
     "openid",
@@ -31,20 +27,15 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/userinfo.profile",
     "https://www.googleapis.com/auth/admin.directory.group.readonly"
 ]
-GOOGLE_AUTH_REDIRECT_URI = "https://127.0.0.1/"
-GOOGLE_CLIENT_SECRETS = ""
 
 GUILD = "Robotiklubi"
 GROUP_ROLE_PAIRS = {
     "juhatus@robotiklubi.ee": "Juhatus",
     "liikmed@robotiklubi.ee": "Liige",
     "aktivistid@robotiklubi.ee": "Liige",
-    "vilistlased@robotiklubi.ee": "Vilistlane",
-    # "kursandid@robotiklubi.ee": "Kursant"
+    "vilistlased@robotiklubi.ee": "Vilistlane"
 }
 global_group_member_pairs = {}
-
-TOKEN_FILE = 'group_read_token.json'
 
 
 async def create_auth_url_embed(authorization_url):
@@ -172,24 +163,30 @@ class Bot:
         return user_in_groups
 
     async def get_refresh_credentials(self, message, attempt=0):
-        logging.info(f"Getting credentials for refreshing members list, attempt {attempt}")
-
         if attempt > 2:
-            logging.error("Failed to get credentials for refreshing members list")
+            logging.error("Failed to get credentials for refreshing members list (maximum attempts exceeded)")
             if message:
                 await message.author.send("Amount of attempts exceeded. Please try again later.")
             return None
 
+        if not attempt:
+            logging.info(f"Getting credentials for refreshing members list")
+        else:
+            logging.info(f"Retry attempt {attempt}: Getting credentials for refreshing members list.")
+
         credentials = None
         if os.path.exists(TOKEN_FILE):
+            logging.debug("Token file exists, using it")
             credentials = Credentials.from_authorized_user_file(TOKEN_FILE, GOOGLE_SCOPES)
 
         # If saved credentials exist and are still valid, return them
         if credentials and credentials.valid:
+            logging.info("Using saved credentials from token file")
             return credentials
 
         # If saved credentials exist but are expired, refresh them
         if credentials and credentials.expired and credentials.refresh_token:
+            logging.info("Token file exists but is expired, refreshing credentials")
             credentials.refresh(Request())
             with open(TOKEN_FILE, "w") as token:
                 token.write(credentials.to_json())
@@ -203,6 +200,7 @@ class Bot:
         )
         if message:
             # If refresh is initiated by a user, send them the authorization link
+            logging.info("Sending authorization link to user who initiated refresh")
             await message.author.send(f"[Authorization link]({flow.authorization_url()[0]})\n\n"
                                       f"Click the link above and enter the code here.")
             dm_chan = message.channel
@@ -222,15 +220,16 @@ class Bot:
                 return self.get_refresh_credentials(message, attempt + 1)
         else:
             # Initiate conversation with Tech Lead for token refresh
-            tech_lead_user = self.client.get_user(TECH_LEAD_ID)
+            logging.info("Sending authorization link to tech lead")
+            tech_lead_user = self.client.get_user(ADMIN_USER_ID)
             await tech_lead_user.send(f"The bot's token has expired. Please refresh it.")
             message = await tech_lead_user.send(f"[Authorization link]({flow.authorization_url()[0]})\n\n"
                                                 f"Click the link above and enter the code here.")
             dm_chan = message.channel
+            response = await self.client.wait_for("message",
+                                                  check=(lambda m: m.channel == dm_chan),
+                                                  timeout=300.0)
             try:
-                response = await self.client.wait_for("message",
-                                                      check=(lambda m: m.channel == dm_chan),
-                                                      timeout=300.0)
                 flow.fetch_token(authorization_response=response.content)
                 credentials = flow.credentials
             except asyncio.TimeoutError:
@@ -240,17 +239,18 @@ class Bot:
             except Exception as e:
                 await tech_lead_user.send("Error occurred, please try again")
                 logging.error(f"Error: {e}")
-                return self.get_refresh_credentials(message, attempt + 1)
+                return self.get_refresh_credentials(response, attempt + 1)
 
         with open(TOKEN_FILE, "w") as token:
             token.write(credentials.to_json())
         return credentials
 
     async def refresh_members_list(self, message=None):
-        credentials = self.get_refresh_credentials(message)
+        credentials = await self.get_refresh_credentials(message)
         if not credentials:
             logging.error("Failed to get credentials for refreshing members list")
             return
+        logging.info("Successfully got credentials for refreshing members list")
 
         query_service = discovery.build('admin', 'directory_v1', credentials=credentials)
         results_groups = query_service.groups().list(domain='robotiklubi.ee', maxResults=400).execute()
@@ -279,8 +279,11 @@ class Bot:
 if __name__ == '__main__':
     # Load env variables
     load_dotenv()
-    GOOGLE_CLIENT_SECRETS = json.loads(os.getenv('GOOGLE_APPLICATION_CREDENTIALS'))
-    DISCORD_BOT_TOKEN = os.getenv('DISCORD_TOKEN')
+    GOOGLE_CLIENT_SECRETS = json.loads(os.getenv('DGWA_GOOGLE_CLIENT_SECRETS'))
+    DISCORD_BOT_TOKEN = os.getenv('DGWA_DISCORD_BOT_TOKEN')
+    GOOGLE_AUTH_REDIRECT_URI = os.getenv('DGWA_GOOGLE_AUTH_REDIRECT_URI')
+    TOKEN_FILE = os.getenv('DGWA_TOKEN_FILE', 'group_read_token.json')
+    ADMIN_USER_ID = os.getenv('DGWA_ADMIN_USER_ID')
 
     bot = Bot(intents=INTENTS, token=DISCORD_BOT_TOKEN)
     bot.run()
