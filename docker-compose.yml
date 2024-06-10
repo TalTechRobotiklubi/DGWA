@@ -1,8 +1,8 @@
 version: '3.8'
 
 services:
-  DGWA-bot:
-    container_name: DGWA-bot
+  dgwa-bot:
+    container_name: dgwa-bot
     build: .
     restart: unless-stopped
 
