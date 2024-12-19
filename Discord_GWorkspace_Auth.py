@@ -115,7 +115,6 @@ class Bot:
 
         # If we are in DM or the configured channel and the user requested GET_ROLE
         if ("GET_ROLE" in message.content) and (is_dm or is_listen_channel):
-            await self.process_get_role_request(message)
             # If the message is not a DM (which means it's in a server), delete it
             if not is_dm:
                 try:
@@ -124,6 +123,7 @@ class Bot:
                     logging.warning("Bot does not have permission to delete messages.")
                 except discord.NotFound:
                     logging.warning("Message already deleted or not found.")
+            await self.process_get_role_request(message)
         elif "REFRESH_LOADED_WORKSPACE_GROUPS" in message.content and is_dm:
             await self.refresh_members_list(message)
 
