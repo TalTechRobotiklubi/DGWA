@@ -59,7 +59,7 @@ async def create_auth_url_embed(authorization_url):
     embed.add_field(name="Step 2", value="After login, you can close the browser tab. The bot will handle the rest.",
                     inline=False)
     embed.add_field(name="Link", value=f"[Click me!]({authorization_url})", inline=False)
-    embed.set_footer(text="If you don't complete the process within 120s, you will have to restart.")
+    embed.set_footer(text="If you don't complete the process within 120s, you will have to restart by sending `GET_ROLE`.")
     return embed
 
 
