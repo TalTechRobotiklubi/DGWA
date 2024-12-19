@@ -107,14 +107,12 @@ class Bot:
 
         # Check if message is in the configured channel (if set)
         is_listen_channel = False
-        if self.listen_channel_id:
-            if (message.channel.id == int(self.listen_channel_id) and
-                    (self.listen_guild_id is None or (
-                            message.guild and str(message.guild.id) == self.listen_guild_id))):
+        if self.listen_channel_id and message.channel.id == int(self.listen_channel_id):
+            if self.listen_guild_id is None or (message.guild and str(message.guild.id) == self.listen_guild_id):
                 is_listen_channel = True
 
         # If we are in DM or the configured channel and the user requested GET_ROLE
-        if ("GET_ROLE" in message.content) and (is_dm or is_listen_channel):
+        if ("GET_ROLE" in message.content.upper()) and (is_dm or is_listen_channel):
             # If the message is not a DM (which means it's in a server), delete it
             if not is_dm:
                 try:
