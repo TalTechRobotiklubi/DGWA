@@ -4,7 +4,7 @@ Requires=docker.service
 After=docker.service
 
 [Service]
-WorkingDirectory=/opt/docker/DGWA
+WorkingDirectory=/opt/DGWA
 ExecStart=/usr/local/bin/docker-compose up -d
 ExecStop=/usr/local/bin/docker-compose down
 Restart=always
