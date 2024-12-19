@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+from multiprocessing.connection import Listener
 from os import access
 
 import discord
@@ -67,6 +68,10 @@ class Bot:
         self.client = discord.Client(intents=intents)
         self.token = token
 
+        # Optional listening channel and guild
+        self.listen_channel_id = LISTEN_CHANNEL_ID
+        self.listen_guild_id = LISTEN_GUILD_ID
+
         @self.client.event
         async def on_ready():
             logging.info(f'Logged in as {self.client.user}')
@@ -97,24 +102,51 @@ class Bot:
         if message.author == self.client.user:
             return
 
-        if isinstance(message.channel, discord.channel.DMChannel):
-            if "GET_ROLE" in message.content:
-                await self.process_get_role_request(message)
-            elif "REFRESH_LOADED_WORKSPACE_GROUPS" in message.content:
-                await self.refresh_members_list(message)
+        # Check if message is in DM
+        is_dm = isinstance(message.channel, discord.channel.DMChannel)
+
+        # Check if message is in the configured channel (if set)
+        is_listen_channel = False
+        if self.listen_channel_id:
+            if (message.channel.id == int(self.listen_channel_id) and
+                    (self.listen_guild_id is None or (
+                            message.guild and str(message.guild.id) == self.listen_guild_id))):
+                is_listen_channel = True
+
+        # If we are in DM or the configured channel and the user requested GET_ROLE
+        if ("GET_ROLE" in message.content) and (is_dm or is_listen_channel):
+            await self.process_get_role_request(message)
+            # If the message is not a DM (which means it's in a server), delete it
+            if not is_dm:
+                try:
+                    await message.delete()
+                except discord.Forbidden:
+                    logging.warning("Bot does not have permission to delete messages.")
+                except discord.NotFound:
+                    logging.warning("Message already deleted or not found.")
+        elif "REFRESH_LOADED_WORKSPACE_GROUPS" in message.content and is_dm:
+            await self.refresh_members_list(message)
 
     async def process_get_role_request(self, message):
-        groups = await self.get_user_groups(message.author)
-        if groups:
+        # Determine the member to get roles for
+        if isinstance(message.channel, discord.channel.DMChannel):
+            # Author is the member
             author = message.author
             guild = discord.utils.get(self.client.guilds, name=GUILD)
             member = guild.get_member(author.id)
-            if not member:
-                logging.warning(f"No member found with author id: {author.id}")
-                return
+        else:
+            # If not DM, we must have guild and a sender
+            member = message.guild.get_member(message.author.id)
+
+        if not member:
+            logging.warning(f"No member found for author id: {message.author.id}")
+            return
+
+        groups = await self.get_user_groups(member)
+        if groups:
             for key, value in GROUP_ROLE_PAIRS.items():
                 if key in groups:
-                    role = discord.utils.get(guild.roles, name=value)
+                    role = discord.utils.get(member.guild.roles, name=value)
                     await member.add_roles(role)
                     logging.info(f"Added role {role.name} to {member.name}")
                     await member.send(f"Role '{role.name}' added")
@@ -351,6 +383,14 @@ if __name__ == '__main__':
     TOKEN_FILE = os.getenv('DGWA_TOKEN_FILE', 'data/group_read_token.json')
     ADMIN_USER_ID = check_not_empty(os.getenv('DGWA_ADMIN_USER_ID'), 'DGWA_ADMIN_USER_ID')
     LOG_LEVEL = os.getenv('DGWA_LOG_LEVEL', 'INFO').upper()
+
+    LISTEN_CHANNEL_ID = os.getenv('DGWA_LISTEN_CHANNEL_ID')
+    LISTEN_GUILD_ID = os.getenv('DGWA_LISTEN_GUILD_ID')
+    # If one is set, both must be set
+    if LISTEN_CHANNEL_ID and not LISTEN_GUILD_ID:
+        raise ValueError("If LISTEN_CHANNEL_ID is set, LISTEN_GUILD_ID must be set as well.")
+    if LISTEN_GUILD_ID and not LISTEN_CHANNEL_ID:
+        raise ValueError("If LISTEN_GUILD_ID is set, LISTEN_CHANNEL_ID must be set as well.")
 
     # Check that the log level is valid
     if LOG_LEVEL not in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
