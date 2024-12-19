@@ -28,7 +28,15 @@ GOOGLE_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/userinfo.profile",
-    "https://www.googleapis.com/auth/admin.directory.group.readonly"
+]
+
+GOOGLE_ADMIN_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/admin.directory.group.readonly",
+    "https://www.googleapis.com/auth/admin.directory.group.member.readonly",
+    "https://www.googleapis.com/auth/admin.directory.user",
 ]
 
 GUILD = "Robotiklubi"
@@ -150,10 +158,35 @@ class Bot:
         session = flow.authorized_session()
         profile_info = session.get('https://www.googleapis.com/userinfo/v2/me').json()
 
+        # Determine which groups the user is in
         user_in_groups = []
         for email, members in global_group_member_pairs.items():
             if profile_info['email'] in members:
                 user_in_groups.append(email)
+
+        # Now we attempt to set the Discord UID in the user's Google Directory profile
+        admin_credentials = await self.get_refresh_credentials()
+        if admin_credentials is None:
+            logging.error("Failed to update Discord UID because admin credentials are not available.")
+        else:
+            # Build the Directory API service with admin credentials
+            service = discovery.build('admin', 'directory_v1', credentials=admin_credentials, cache_discovery=False)
+
+            try:
+                # Patch the user's custom schema field "Accounts" -> "Discord_UID"
+                service.users().patch(
+                    userKey=profile_info['email'],
+                    body={
+                        "customSchemas": {
+                            "Accounts": {
+                                "Discord_UID": str(member.id)  # Store the member's Discord user ID
+                            }
+                        }
+                    }
+                ).execute()
+                logging.info(f"Set Discord UID {member.id} for user {profile_info['email']}.")
+            except Exception as e:
+                logging.error(f"Failed to set Discord UID for user {profile_info['email']}: {e}")
 
         return user_in_groups
 
@@ -169,7 +202,7 @@ class Bot:
         credentials = None
         if os.path.exists(TOKEN_FILE):
             logging.debug("Token file exists, using it")
-            credentials = Credentials.from_authorized_user_file(TOKEN_FILE, GOOGLE_SCOPES)
+            credentials = Credentials.from_authorized_user_file(TOKEN_FILE, GOOGLE_ADMIN_SCOPES)
 
         # If saved credentials exist and are still valid, return them
         if credentials and credentials.valid:
@@ -186,8 +219,8 @@ class Bot:
 
         # Need to get new credentials
         flow = InstalledAppFlow.from_client_config(
-            GOOGLE_CLIENT_SECRETS,
-            scopes=['https://www.googleapis.com/auth/admin.directory.group.readonly'],
+            ADMIN_AUTH_CLIENT_SECRETS,
+            scopes=GOOGLE_ADMIN_SCOPES,
             redirect_uri=GOOGLE_AUTH_REDIRECT_URI
         )
 
@@ -311,6 +344,8 @@ if __name__ == '__main__':
     load_dotenv()
     GOOGLE_CLIENT_SECRETS = json.loads(
         check_not_empty(os.getenv('DGWA_GOOGLE_CLIENT_SECRETS'), 'DGWA_GOOGLE_CLIENT_SECRETS'))
+    ADMIN_AUTH_CLIENT_SECRETS = json.loads(
+        check_not_empty(os.getenv('DGWA_ADMIN_AUTH_CLIENT_SECRETS'), 'DGWA_ADMIN_AUTH_CLIENT_SECRETS'))
     DISCORD_BOT_TOKEN = check_not_empty(os.getenv('DGWA_DISCORD_BOT_TOKEN'), 'DGWA_DISCORD_BOT_TOKEN')
     GOOGLE_AUTH_REDIRECT_URI = check_not_empty(os.getenv('DGWA_GOOGLE_AUTH_REDIRECT_URI'), 'DGWA_GOOGLE_AUTH_REDIRECT_URI')
     TOKEN_FILE = os.getenv('DGWA_TOKEN_FILE', 'data/group_read_token.json')
