@@ -5,11 +5,12 @@ After=docker.service
 
 [Service]
 WorkingDirectory=/opt/DGWA
-ExecStart=/usr/local/bin/docker-compose up -d
-ExecStop=/usr/local/bin/docker-compose down
-Restart=always
+ExecStart=docker compose up -d
+ExecStop=docker compose down
 User=dockeruser
 Group=dockeruser
+Type=oneshot
+RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
