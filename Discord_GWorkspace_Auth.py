@@ -112,7 +112,7 @@ class Bot:
                 is_listen_channel = True
 
         # If we are in DM or the configured channel and the user requested GET_ROLE
-        if ("GET_ROLE" in message.content.upper()) and (is_dm or is_listen_channel):
+        if ("GET_ROLE" == message.content.upper().strip()) and (is_dm or is_listen_channel):
             # If the message is not a DM (which means it's in a server), delete it
             if not is_dm:
                 try:
