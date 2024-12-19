@@ -3,24 +3,9 @@ services:
     container_name: dgwa-bot
     build: .
     restart: unless-stopped
-
-  swag:
-    image: lscr.io/linuxserver/swag:latest
-    container_name: swag
-    cap_add:
-      - NET_ADMIN
-    environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=Etc/UTC
-      - URL=robotiklubi.ee
-      - VALIDATION=http
-      - EMAIL=tehnika@robotiklubi.ee
-      - SUBDOMAINS=discord-auth
-      - ONLY_SUBDOMAINS=true
-    volumes:
-      - ./swag-config/:/config
+    env_file:
+      - .env
     ports:
-      - "443:443"
-      - "80:80"
-    restart: unless-stopped
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data

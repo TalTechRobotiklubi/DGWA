@@ -1,17 +1,20 @@
 import json
 import os
-import re
 import logging
+from os import access
+
 import discord
 import asyncio
+import ssl
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient import discovery
+from aiohttp import web
 
 # Setup logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Discord bot variables
 INTENTS = discord.Intents.default()
@@ -37,34 +40,18 @@ GROUP_ROLE_PAIRS = {
 }
 global_group_member_pairs = {}
 
+# This will map state -> (flow, user_id, future)
+state_flows = {}
+
 
 async def create_auth_url_embed(authorization_url):
     embed = discord.Embed(title="Getting a role", color=0x00ff00)
-    embed.add_field(name="Step 1", value="Click on the link below", inline=False)
-    embed.add_field(name="Step 2", value="Login. Ignore the \"This site can’t be reached\" error", inline=False)
-    embed.add_field(name="Step 3", value="Post the resulting URL in this chat", inline=False)
+    embed.add_field(name="Step 1", value="Click on the link below and sign in with your Google account.", inline=False)
+    embed.add_field(name="Step 2", value="After login, you can close the browser tab. The bot will handle the rest.",
+                    inline=False)
     embed.add_field(name="Link", value=f"[Click me!]({authorization_url})", inline=False)
-    embed.set_footer(text="If you don't answer within 120s, you will have to restart the process.")
+    embed.set_footer(text="If you don't complete the process within 120s, you will have to restart.")
     return embed
-
-
-async def handle_response(response, state, member):
-    if response.content == "CANCEL":
-        await member.send("Canceling process")
-        return False
-    if "https://127.0.0.1/" in response.content:
-        if state not in response.content:
-            await member.send("Incorrect URL")
-            return True
-        pattern = r"(?:https://127\.0\.0\.1/\?.*code=)(.+?)(?:&scope=|$)(?:.*group.readonly)"
-        code = re.search(pattern, response.content).group(1)
-        if not code:
-            await member.send("No authorization code in the given URL")
-            return True
-    else:
-        await member.send("Incorrect URL or timed out")
-        return True
-    return False
 
 
 class Bot:
@@ -75,7 +62,10 @@ class Bot:
         @self.client.event
         async def on_ready():
             logging.info(f'Logged in as {self.client.user}')
-            await self.client.loop.create_task(self.refresh_members_list_periodically())
+            # Start the periodic refresh in the background
+            self.client.loop.create_task(self.refresh_members_list_periodically())
+            # Start the web server in the background
+            self.client.loop.create_task(self.start_web_server())
 
         @self.client.event
         async def on_member_join(member):
@@ -113,7 +103,7 @@ class Bot:
             member = guild.get_member(author.id)
             if not member:
                 logging.warning(f"No member found with author id: {author.id}")
-
+                return
             for key, value in GROUP_ROLE_PAIRS.items():
                 if key in groups:
                     role = discord.utils.get(guild.roles, name=value)
@@ -122,8 +112,9 @@ class Bot:
                     await member.send(f"Role '{role.name}' added")
 
     async def get_user_groups(self, member):
-        logging.info(f"Sending embed to {member.name}")
+        logging.info(f"Starting OAuth flow for {member.name}")
 
+        # Create a unique Flow and state for this authentication attempt
         flow = Flow.from_client_config(
             client_config=GOOGLE_CLIENT_SECRETS,
             scopes=GOOGLE_SCOPES,
@@ -135,23 +126,27 @@ class Bot:
             include_granted_scopes='true'
         )
 
+        # Create a future that will be set once we get the code from callback
+        code_future = asyncio.Future()
+        logging.info(f"Created OAuth flow for {member.name} with state {state}")
+        state_flows[state] = (flow, member.id, code_future)
+
         embed = await create_auth_url_embed(authorization_url)
         await member.send(embed=embed)
-        dm_chan = await member.create_dm()
 
+        # Wait for the code to come through the web callback or timeout
         try:
-            response = await self.client.wait_for("message", check=lambda m: m.channel == dm_chan, timeout=120.0)
-        except Exception:
-            logging.error("Timed out")
+            await asyncio.wait_for(code_future, timeout=120.0)
+        except asyncio.TimeoutError:
+            logging.error("Timed out waiting for OAuth callback")
             await member.send("Timed out, type GET_ROLE to start again")
-            raise
+            # Cleanup the state
+            state_flows.pop(state, None)
+            return []
 
-        if await handle_response(response, state, member):
-            return await self.get_user_groups(member)
-
-        logging.info(f"Processing {member.name}")
-
-        flow.fetch_token(authorization_response=response.content)
+        # Once we have the code (set in the callback), we can fetch the token
+        code = code_future.result()
+        credentials = flow.credentials
         session = flow.authorized_session()
         profile_info = session.get('https://www.googleapis.com/userinfo/v2/me').json()
 
@@ -162,17 +157,14 @@ class Bot:
 
         return user_in_groups
 
-    async def get_refresh_credentials(self, message, attempt=0):
+    async def get_refresh_credentials(self, message=None, attempt=0):
         if attempt > 2:
             logging.error("Failed to get credentials for refreshing members list (maximum attempts exceeded)")
             if message:
                 await message.author.send("Amount of attempts exceeded. Please try again later.")
             return None
 
-        if not attempt:
-            logging.info(f"Getting credentials for refreshing members list")
-        else:
-            logging.info(f"Retry attempt {attempt}: Getting credentials for refreshing members list.")
+        logging.info(f"Attempt {attempt}: Getting credentials for refreshing members list.")
 
         credentials = None
         if os.path.exists(TOKEN_FILE):
@@ -198,48 +190,39 @@ class Bot:
             scopes=['https://www.googleapis.com/auth/admin.directory.group.readonly'],
             redirect_uri=GOOGLE_AUTH_REDIRECT_URI
         )
+
+        auth_url, state = flow.authorization_url(access_type='offline', prompt='consent')
+        code_future = asyncio.Future()
+        state_flows[state] = (flow, message.author.id if message else ADMIN_USER_ID, code_future)
+
         if message:
-            # If refresh is initiated by a user, send them the authorization link
-            logging.info("Sending authorization link to user who initiated refresh")
-            await message.author.send(f"[Authorization link]({flow.authorization_url()[0]})\n\n"
-                                      f"Click the link above and enter the code here.")
-            dm_chan = message.channel
-            try:
-                response = await self.client.wait_for("message",
-                                                      check=(lambda m: m.channel == dm_chan),
-                                                      timeout=120.0)
-                flow.fetch_token(authorization_response=response.content)
-                credentials = flow.credentials
-            except asyncio.TimeoutError:
-                await message.author.send("Timed out")
-                logging.error("Timed out waiting for user to refresh token")
-                return None
-            except Exception as e:
-                await message.author.send("Error occurred, please try again")
-                logging.error(f"Error: {e}")
-                return self.get_refresh_credentials(message, attempt + 1)
+            await message.author.send(f"Please click the following link to authorize:\n{auth_url}")
         else:
-            # Initiate conversation with Tech Lead for token refresh
-            logging.info("Sending authorization link to tech lead")
-            tech_lead_user = self.client.get_user(ADMIN_USER_ID)
-            await tech_lead_user.send(f"The bot's token has expired. Please refresh it.")
-            message = await tech_lead_user.send(f"[Authorization link]({flow.authorization_url()[0]})\n\n"
-                                                f"Click the link above and enter the code here.")
-            dm_chan = message.channel
-            response = await self.client.wait_for("message",
-                                                  check=(lambda m: m.channel == dm_chan),
-                                                  timeout=300.0)
-            try:
-                flow.fetch_token(authorization_response=response.content)
-                credentials = flow.credentials
-            except asyncio.TimeoutError:
-                await tech_lead_user.send("Timed out")
-                logging.error("Timed out waiting for tech lead to refresh token")
-                return None
-            except Exception as e:
-                await tech_lead_user.send("Error occurred, please try again")
-                logging.error(f"Error: {e}")
-                return self.get_refresh_credentials(response, attempt + 1)
+            tech_lead_user = self.client.get_user(int(ADMIN_USER_ID))
+            await tech_lead_user.send(
+                f"The bot's token has expired. Please authorize by clicking the link below:\n{auth_url}")
+
+        try:
+            await asyncio.wait_for(code_future, timeout=300.0)
+            credentials = flow.credentials
+        except asyncio.TimeoutError:
+            logging.error("Timed out waiting for authorization")
+            if message:
+                await message.author.send("Authorization timed out. Please try again.")
+            else:
+                tech_lead_user = self.client.get_user(int(ADMIN_USER_ID))
+                await tech_lead_user.send("Authorization timed out. Please try again.")
+            return None
+        except Exception as e:
+            logging.error(f"Error during authorization: {e}")
+            if message:
+                await message.author.send("An error occurred during authorization. Please try again.")
+            else:
+                tech_lead_user = self.client.get_user(int(ADMIN_USER_ID))
+                await tech_lead_user.send("An error occurred during authorization. Please try again.")
+            return None
+        finally:
+            state_flows.pop(state, None)
 
         with open(TOKEN_FILE, "w") as token:
             token.write(credentials.to_json())
@@ -252,7 +235,7 @@ class Bot:
             return
         logging.info("Successfully got credentials for refreshing members list")
 
-        query_service = discovery.build('admin', 'directory_v1', credentials=credentials)
+        query_service = discovery.build('admin', 'directory_v1', credentials=credentials, cache_discovery=False)
         results_groups = query_service.groups().list(domain='robotiklubi.ee', maxResults=400).execute()
         groups = results_groups.get('groups', [])
 
@@ -272,18 +255,74 @@ class Bot:
             await self.refresh_members_list()
             await asyncio.sleep(3600)  # Sleep for one hour
 
+    async def start_web_server(self):
+        app = web.Application()
+        app.add_routes([web.get('/', self.handle_callback)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+
+        # Create SSL context
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.load_cert_chain('data/cert.pem', 'data/key.pem')
+
+        # Start HTTPS server on port 5000
+        site = web.TCPSite(runner, '0.0.0.0', 5000, ssl_context=ssl_context)
+        await site.start()
+        logging.info("Web server started on https://0.0.0.0:5000")
+
+    async def handle_callback(self, request):
+        code = request.query.get('code')
+        state = request.query.get('state')
+        if not code or not state:
+            return web.Response(text="Missing code or state", status=400)
+
+        logging.debug(f"Received callback with code {code} and state {state}")
+        entry = state_flows.get(state)
+        if not entry:
+            return web.Response(text="Invalid or expired state", status=400)
+
+        flow, user_id, code_future = entry
+        try:
+            flow.fetch_token(authorization_response=str(request.url))
+            if not code_future.done():
+                code_future.set_result(code)
+        except Exception as e:
+            logging.error(f"Error completing OAuth flow: {e}")
+            if not code_future.done():
+                code_future.set_exception(e)
+            return web.Response(text="Error completing OAuth flow", status=500)
+        finally:
+            state_flows.pop(state, None)
+
+        return web.Response(text="Authorization complete! You can close this window.")
+
     def run(self):
         self.client.run(self.token)
+
+
+def check_not_empty(value, name):
+    if not value:
+        raise ValueError(f"{name} is not set, but required. Please set it in the .env file.")
+    return value
 
 
 if __name__ == '__main__':
     # Load env variables
     load_dotenv()
-    GOOGLE_CLIENT_SECRETS = json.loads(os.getenv('DGWA_GOOGLE_CLIENT_SECRETS'))
-    DISCORD_BOT_TOKEN = os.getenv('DGWA_DISCORD_BOT_TOKEN')
-    GOOGLE_AUTH_REDIRECT_URI = os.getenv('DGWA_GOOGLE_AUTH_REDIRECT_URI')
-    TOKEN_FILE = os.getenv('DGWA_TOKEN_FILE', 'group_read_token.json')
-    ADMIN_USER_ID = os.getenv('DGWA_ADMIN_USER_ID')
+    GOOGLE_CLIENT_SECRETS = json.loads(
+        check_not_empty(os.getenv('DGWA_GOOGLE_CLIENT_SECRETS'), 'DGWA_GOOGLE_CLIENT_SECRETS'))
+    DISCORD_BOT_TOKEN = check_not_empty(os.getenv('DGWA_DISCORD_BOT_TOKEN'), 'DGWA_DISCORD_BOT_TOKEN')
+    GOOGLE_AUTH_REDIRECT_URI = check_not_empty(os.getenv('DGWA_GOOGLE_AUTH_REDIRECT_URI'), 'DGWA_GOOGLE_AUTH_REDIRECT_URI')
+    TOKEN_FILE = os.getenv('DGWA_TOKEN_FILE', 'data/group_read_token.json')
+    ADMIN_USER_ID = check_not_empty(os.getenv('DGWA_ADMIN_USER_ID'), 'DGWA_ADMIN_USER_ID')
+    LOG_LEVEL = os.getenv('DGWA_LOG_LEVEL', 'INFO').upper()
+
+    # Check that the log level is valid
+    if LOG_LEVEL not in ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']:
+        logging.warning(f"Invalid log level '{LOG_LEVEL}', defaulting to 'INFO'")
+        LOG_LEVEL = 'INFO'
+
+    logging.getLogger().setLevel(LOG_LEVEL)
 
     bot = Bot(intents=INTENTS, token=DISCORD_BOT_TOKEN)
     bot.run()

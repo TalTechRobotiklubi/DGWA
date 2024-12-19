@@ -1,4 +1,4 @@
-FROM python:3.10
+FROM python:3.12-alpine
 
 # Set the working directory
 WORKDIR /app
@@ -12,5 +12,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the application code
 COPY . .
 
-# Command to run the script
-CMD ["python", "Discord_GWorkspace_Auth.py"]
+# Run entrypoint.sh
+ENTRYPOINT ["./entrypoint.sh"]

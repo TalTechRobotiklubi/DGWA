@@ -190,3 +190,7 @@ fabric.properties
 group_read_token.json
 swag-config/
 docker-compose.override.yml
+*.pem
+*.key
+*.crt
+data/
